@@ -48,7 +48,9 @@ public class ProcessQueue {
     /** 读写锁 */
     private final ReadWriteLock lockTreeMap = new ReentrantReadWriteLock();
     private final TreeMap<Long, MessageExt> msgTreeMap = new TreeMap<Long, MessageExt>();
+    /** 消息数量 */
     private final AtomicLong msgCount = new AtomicLong();
+    /** 消息大小 */
     private final AtomicLong msgSize = new AtomicLong();
     private final Lock lockConsume = new ReentrantLock();
     /**
@@ -63,6 +65,7 @@ public class ProcessQueue {
     private volatile boolean locked = false;
     private volatile long lastLockTimestamp = System.currentTimeMillis();
     private volatile boolean consuming = false;
+    /** Broker未被处理的消息offset */
     private volatile long msgAccCnt = 0;
 
     public boolean isLockExpired() {
@@ -74,23 +77,28 @@ public class ProcessQueue {
     }
 
     /**
+     * 清除过期消息
+     *
      * @param pushConsumer
      */
     public void cleanExpiredMsg(DefaultMQPushConsumer pushConsumer) {
+        // 如果是顺序消费，不清除，直接返回
         if (pushConsumer.getDefaultMQPushConsumerImpl().isConsumeOrderly()) {
             return;
         }
 
+        // 每次最多处理16条消息
         int loop = msgTreeMap.size() < 16 ? msgTreeMap.size() : 16;
         for (int i = 0; i < loop; i++) {
             MessageExt msg = null;
             try {
+                // 获取读锁
                 this.lockTreeMap.readLock().lockInterruptibly();
                 try {
+                    // 如果第一条消息阻塞线程超过15分钟，先进先出
                     if (!msgTreeMap.isEmpty() && System.currentTimeMillis() - Long.parseLong(MessageAccessor.getConsumeStartTimeStamp(msgTreeMap.firstEntry().getValue())) > pushConsumer.getConsumeTimeout() * 60 * 1000) {
                         msg = msgTreeMap.firstEntry().getValue();
                     } else {
-
                         break;
                     }
                 } finally {
@@ -101,14 +109,16 @@ public class ProcessQueue {
             }
 
             try {
-
+                // 将消息发回Broker，将来会重新发送。延迟级别3，10s
                 pushConsumer.sendMessageBack(msg, 3);
                 log.info("send expire msg back. topic={}, msgId={}, storeHost={}, queueId={}, queueOffset={}", msg.getTopic(), msg.getMsgId(), msg.getStoreHost(), msg.getQueueId(), msg.getQueueOffset());
                 try {
+                    // 获取写锁
                     this.lockTreeMap.writeLock().lockInterruptibly();
                     try {
                         if (!msgTreeMap.isEmpty() && msg.getQueueOffset() == msgTreeMap.firstKey()) {
                             try {
+                                // Consumer本地列表移除此消息
                                 removeMessage(Collections.singletonList(msg));
                             } catch (Exception e) {
                                 log.error("send expired msg exception", e);
@@ -126,31 +136,48 @@ public class ProcessQueue {
         }
     }
 
+    /**
+     * 派发消息到Consumer
+     *
+     * @param msgs
+     * @return
+     */
     public boolean putMessage(final List<MessageExt> msgs) {
         boolean dispatchToConsume = false;
         try {
+            // 获取写锁
             this.lockTreeMap.writeLock().lockInterruptibly();
             try {
                 int validMsgCnt = 0;
+                // 遍历消息列表
                 for (MessageExt msg : msgs) {
+                    // 以queueOffset为key将消息放入msgTreeMap
                     MessageExt old = msgTreeMap.put(msg.getQueueOffset(), msg);
                     if (null == old) {
+                        // 更新count
                         validMsgCnt++;
+                        // 更新偏移量
                         this.queueOffsetMax = msg.getQueueOffset();
+                        // 更新msgSize
                         msgSize.addAndGet(msg.getBody().length);
                     }
                 }
                 msgCount.addAndGet(validMsgCnt);
 
+                // 如果非消费中状态
                 if (!msgTreeMap.isEmpty() && !this.consuming) {
                     dispatchToConsume = true;
+                    // 标记消息进入消费状态
                     this.consuming = true;
                 }
 
                 if (!msgs.isEmpty()) {
+                    // 获取Broker最后一条消息
                     MessageExt messageExt = msgs.get(msgs.size() - 1);
+                    // 获取Broker最大MAX_OFFSET
                     String property = messageExt.getProperty(MessageConst.PROPERTY_MAX_OFFSET);
                     if (property != null) {
+                        // 计算Broker未处理消息OFFSET
                         long accTotal = Long.parseLong(property) - messageExt.getQueueOffset();
                         if (accTotal > 0) {
                             this.msgAccCnt = accTotal;
@@ -167,6 +194,11 @@ public class ProcessQueue {
         return dispatchToConsume;
     }
 
+    /**
+     * 计算最大偏移量
+     *
+     * @return
+     */
     public long getMaxSpan() {
         try {
             this.lockTreeMap.readLock().lockInterruptibly();
@@ -184,6 +216,12 @@ public class ProcessQueue {
         return 0;
     }
 
+    /**
+     * 从列表中移除消息
+     *
+     * @param msgs 即将被移除消息列表
+     * @return 下一个offset
+     */
     public long removeMessage(final List<MessageExt> msgs) {
         long result = -1;
         final long now = System.currentTimeMillis();
@@ -201,6 +239,7 @@ public class ProcessQueue {
                             msgSize.addAndGet(0 - msg.getBody().length);
                         }
                     }
+                    // 减去消息个数
                     msgCount.addAndGet(removedCnt);
 
                     if (!msgTreeMap.isEmpty()) {
