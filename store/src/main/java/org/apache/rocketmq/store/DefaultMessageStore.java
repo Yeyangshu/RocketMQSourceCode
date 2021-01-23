@@ -474,6 +474,12 @@ public class DefaultMessageStore implements MessageStore {
         return resultFuture;
     }
 
+    /**
+     * 存储消息
+     *
+     * @param msg Message instance to store
+     * @return
+     */
     @Override
     public PutMessageResult putMessage(MessageExtBrokerInner msg) {
         PutMessageStatus checkStoreStatus = this.checkStoreStatus();
@@ -487,6 +493,7 @@ public class DefaultMessageStore implements MessageStore {
         }
 
         long beginTime = this.getSystemClock().now();
+        // 核心方法，写入的实现方法
         PutMessageResult result = this.commitLog.putMessage(msg);
         long elapsedTime = this.getSystemClock().now() - beginTime;
         if (elapsedTime > 500) {
@@ -502,6 +509,12 @@ public class DefaultMessageStore implements MessageStore {
         return result;
     }
 
+    /**
+     * 批量的存储
+     *
+     * @param messageExtBatch Message batch.
+     * @return
+     */
     @Override
     public PutMessageResult putMessages(MessageExtBatch messageExtBatch) {
         PutMessageStatus checkStoreStatus = this.checkStoreStatus();

@@ -238,7 +238,9 @@ public class DefaultMQPushConsumerImpl implements MQConsumerInner {
             return;
         }
 
+        // 缓存消息数量
         long cachedMessageCount = processQueue.getMsgCount().get();
+        // 缓存消息的大小（MB）
         long cachedMessageSizeInMiB = processQueue.getMsgSize().get() / (1024 * 1024);
 
         if (cachedMessageCount > this.defaultMQPushConsumer.getPullThresholdForQueue()) {
